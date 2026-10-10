@@ -1,0 +1,32 @@
+# 构建产物、预览与本地备份
+/build/
+/.artifacts/
+/.gradle/
+/dist/
+/backups/
+
+# 本地 IDE 配置
+/.idea/
+/.vscode/
+*.iml
+
+# Python 工具缓存与虚拟环境
+__pycache__/
+*.py[cod]
+/.venv/
+/venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 日志与编辑器临时文件
+*.log
+*.tmp
+*.swp
+*.swo
+*~
+
+# 操作系统元数据
+.DS_Store
+Thumbs.db
+Desktop.ini

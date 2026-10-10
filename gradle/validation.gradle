@@ -1,0 +1,130 @@
+import groovy.json.JsonSlurper
+import java.nio.ByteBuffer
+
+// 构建校验在 JVM 内执行；离线 GPU 编译与图像回归由独立开发工具承担。
+tasks.register('validateShaders') {
+    group = 'verification'
+    description = '检查入口、包含路径、配置翻译、预设与渲染资源约束。'
+    doLast {
+        def root = file('shaders').canonicalFile
+        def require = { boolean valid, String message ->
+            if (!valid) { throw new GradleException(message) }
+        }
+        def read = { File path ->
+            require(path.isFile(), "文件不存在：${path}")
+            path.getText('UTF-8').replace('\r\n', '\n')
+        }
+        def properties = { File path ->
+            def result = [:]
+            read(path).readLines().each { line ->
+                if (line.trim() && !line.trim().startsWith('#') && line.contains('=')) {
+                    int split = line.indexOf('=')
+                    result[line.substring(0, split)] = line.substring(split + 1)
+                }
+            }
+            result
+        }
+        def checked = [] as Set
+        Closure includes
+        includes = { File path, Set parents ->
+            path = path.canonicalFile
+            require(path.toPath().startsWith(root.toPath()), "包含路径超出光影目录：${path}")
+            require(!parents.contains(path), "包含路径形成循环：${path}")
+            if (!checked.contains(path)) {
+                def source = read(path)
+                (source =~ /(?m)^\s*#include\s+"([^"]+)"\s*$/).each { match ->
+                    def target = match[1].startsWith('/') ? new File(root, match[1].substring(1)) : new File(path.parentFile, match[1])
+                    includes(target, parents + [path])
+                }
+                checked.add(path)
+            }
+        }
+        def sources = fileTree(root) { include '**/*.vsh', '**/*.fsh', '**/*.glsl' }.files
+        def scalar = /[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?[fF]?/
+        sources.each { path ->
+            def source = read(path)
+            (source =~ /const\s+vec4\s+(\w+ClearColor)\s*=\s*([^;]+);/).each { match ->
+                require(match[2].trim() ==~ ("vec4\\s*\\(\\s*${scalar}" + ("\\s*,\\s*${scalar}" * 3) + /\s*\)/), "清屏颜色须填写四个标量：${path} / ${match[1]}")
+            }
+            includes(path, [] as Set)
+        }
+        fileTree(root) { include '**/*.properties' }.files.each { path ->
+            require(!path.bytes.any { (it & 255) == 0x85 }, "配置含加载器误判为换行的字节：${path}")
+        }
+        def entries = sources.findAll { it.name.endsWith('.vsh') && (it.parentFile == root || it.parentFile.name in ['world0', 'world-1', 'world1']) }
+        require(!entries.empty, '没有着色器入口。')
+        entries.each { vertex ->
+            def fragment = new File(vertex.parentFile, vertex.name.replaceFirst(/\.vsh$/, '.fsh'))
+            [vertex, fragment].each { path ->
+                require(read(path).startsWith('#version 330 compatibility\n'), "入口的 GLSL 版本无效：${path}")
+            }
+        }
+        sources.findAll { it.name.endsWith('.fsh') && (it.parentFile == root || it.parentFile.name.startsWith('world')) }.each { fragment ->
+            require(new File(fragment.parentFile, fragment.name.replaceFirst(/\.fsh$/, '.vsh')).isFile(), "片元入口缺少顶点入口：${fragment}")
+        }
+        def en = properties(new File(root, 'lang/en_us.lang'))
+        def zh = properties(new File(root, 'lang/zh_cn.lang'))
+        require(en.keySet() == zh.keySet(), '中英文翻译键不一致。')
+        def settings = read(new File(root, 'lib/settings.glsl'))
+        def options = ['SHADOWS', 'HANDHELD_LIGHT'] as Set
+        (settings =~ /(?m)^#define\s+(\w+).*\/\/\s*\[/).each { options.add(it[1]) }
+        (settings =~ /(?m)^const\s+\w+\s+(\w+).*\/\/\s*\[/).each { options.add(it[1]) }
+        options.each { option ->
+            require(en.containsKey("option.${option}".toString()) && en.containsKey("option.${option}.comment".toString()), "选项缺少翻译：${option}")
+        }
+        def props = properties(new File(root, 'shaders.properties'))
+        require(props['size.buffer.colortex7'] == '256 256', '云影附件须为 256×256。')
+        ['colortex1', 'colortex2'].each { name ->
+            require(props["size.buffer.${name}".toString()] == '0.5 0.5', '云层颜色与深度附件须使用半宽半高尺寸。')
+        }
+        def cloudPass = read(new File(root, 'program/cloud_pass.fsh'))
+        require(cloudPass.contains('DRAWBUFFERS:12') && cloudPass.contains('colortex2Format = R32F'), '云层颜色和浮点深度须独立输出。')
+        [root, new File(root, 'world0')].each { directory ->
+            require(read(new File(directory, 'deferred.fsh')).contains('/program/cloud_pass.fsh'), '体积云须先生成独立颜色与距离附件。')
+            require(read(new File(directory, 'deferred1.fsh')).contains('/program/deferred.fsh'), '反射快照须由完整分辨率云合成阶段输出。')
+        }
+        require(!props.keySet().any { it.startsWith('texture.') && (it.endsWith('.colortex7') || it.endsWith('.gaux4')) }, '云影附件不能被自定义纹理覆盖。')
+        require(read(new File(root, 'program/cloud_shadow_map.fsh')).contains('DRAWBUFFERS:7'), '云影附件须独立输出。')
+        require(props['texture.noise'] == 'textures/cloud_noise.png', '云噪声图集须绑定到 noisetex。')
+        byte[] noise = new File(root, props['texture.noise']).bytes
+        require(noise.length >= 26, '云噪声图集不完整。')
+        require((0..<8).collect { noise[it] & 255 } == [137, 80, 78, 71, 13, 10, 26, 10]
+            && ByteBuffer.wrap(noise).getInt(16) == 657 && ByteBuffer.wrap(noise).getInt(20) == 657
+            && noise[24] == 8 && noise[25] == 6, '云噪声图集须为 657×657 RGBA8 PNG。')
+        def metadata = new JsonSlurper().parseText(read(new File(root, 'textures/cloud_noise.png.mcmeta')))
+        require(metadata.texture == [blur: false, clamp: true], '云噪声图集须采用精确角点读取与边界夹取。')
+        Closure screen
+        screen = { String name, Set parents ->
+            require(!parents.contains(name), "配置分组形成循环：${name}")
+            require(props.containsKey(name), "配置分组不存在：${name}")
+            props[name].tokenize().each { token ->
+                if (token.startsWith('[')) {
+                    def group = 'screen.' + token.substring(1, token.length() - 1)
+                    require(en.containsKey(group), "配置分组缺少翻译：${group}")
+                    screen(group, parents + [name])
+                } else {
+                    require(token.startsWith('<') || options.contains(token), "未知配置选项：${token}")
+                }
+            }
+        }
+        screen('screen', [] as Set)
+        require(props.keySet().findAll { it.startsWith('profile.') }.toSet() == ['profile.POTATO', 'profile.DEFAULT', 'profile.EXTREME'].toSet(), '仅允许土豆、默认、极致三档预设。')
+        def expected = [
+            POTATO: ['shadowMapResolution:1024', 'shadowDistance:64.0', 'SHADOW_FILTER:0', 'CLOUD_SAMPLES:16', 'WATER_SHAFT_SAMPLES:4'],
+            DEFAULT: ['shadowMapResolution:2048', 'shadowDistance:96.0', 'SHADOW_FILTER:1', 'CLOUD_SAMPLES:32', 'WATER_SHAFT_SAMPLES:8'],
+            EXTREME: ['shadowMapResolution:4096', 'shadowDistance:128.0', 'SHADOW_FILTER:2', 'CLOUD_SAMPLES:48', 'WATER_SHAFT_SAMPLES:12']
+        ]
+        expected.each { name, tokens ->
+            tokens.addAll(['SHADOWS', 'HANDHELD_LIGHT', 'VOLUMETRIC_CLOUDS:1', 'CLOUD_LIGHTNING:1',
+                'WATER_WAVES:1', 'STARS_ENABLED:1', 'METEORS_ENABLED:1', 'FANTASY_SKY:1', 'FANTASY_BLOOD_MOON:1', 'VEGETATION_WIND:1'])
+            def value = name == 'POTATO' ? '0' : '1'
+            ['CLOUD_SHADOWS', 'WATER_REFLECTIONS', 'WATER_LIGHT_SHAFTS', 'FANTASY_NEBULA',
+             'AURORA_ENABLED', 'WATER_FOAM', 'WATER_CAUSTICS', 'WATER_REFRACTION'].each { option ->
+                tokens.add("${option}:${value}".toString())
+            }
+            def actual = props["profile.${name}".toString()].tokenize()
+            require(actual.toSet() == tokens.toSet() && actual.size() == tokens.size(), "预设参数或选项覆盖不匹配：${name}")
+        }
+        logger.lifecycle("结构校验通过：${entries.size()} 对入口、包含路径、翻译、预设与渲染资源。")
+    }
+}
