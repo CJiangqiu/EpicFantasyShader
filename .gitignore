@@ -4,6 +4,7 @@
 /.gradle/
 /dist/
 /backups/
+/docs/
 
 # 本地 IDE 配置
 /.idea/
