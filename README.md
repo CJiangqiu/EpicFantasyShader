@@ -20,5 +20,5 @@ You are welcome to use it in any modpack or video, and to modify and redistribut
 [![2026-10-10-16-16-22.png](https://i.postimg.cc/j2XcGT7p/2026-10-10-16-16-22.png)](https://postimg.cc/q6N239Qw)
 ### Daytime Clouds and River
 [![2026-10-10-16-17-21.png](https://i.postimg.cc/D0g6thGk/2026-10-10-16-17-21.png)](https://postimg.cc/YLvQWJ8b)
-### Underwater Light Shafts and Refraction
+### Underwater Refraction
 [![2026-10-10-16-18-36.png](https://i.postimg.cc/Y03RJ7Fw/2026-10-10-16-18-36.png)](https://postimg.cc/V0JXC347)
